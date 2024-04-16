@@ -37,7 +37,7 @@ def accuracy(targs, preds, allowance):
     assert targs.shape == preds.shape
     return torch.mean((torch.abs(targs - preds) <= allowance).float()).item()
 
-def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=64, num_epochs=10, seq_len=5, plot_every=50, plot=True, allowance=1.):
+def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=64, num_epochs=10, seq_len=5, plot_every=50, plot=True):
     # Create datasets and data loaders
     train_dataset = TemperatureDataset(train_data, seq_len)
     val_dataset = TemperatureDataset(val_data, seq_len)
@@ -81,21 +81,37 @@ def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=6
 
             total_loss += loss.item()
             if iter_count % plot_every == 0:
-                ta = accuracy(target.to(device), output.squeeze(1).to(device), allowance)
+                ta_1 = accuracy(target.to(device), output.squeeze(1).to(device), 1)
+                ta_3 = accuracy(target.to(device), output.squeeze(1).to(device), 3)
+                ta_5 = accuracy(target.to(device), output.squeeze(1).to(device), 5)
                 val_preds = model(val_inputs)
-                va = accuracy(val_targets, val_preds.squeeze(1), allowance)
-                print(iter_count, "Loss:", float(loss), "Train Acc:", ta, "Val Acc:", va)
+                va_1 = accuracy(val_targets, val_preds.squeeze(1), 1)
+                va_3 = accuracy(val_targets, val_preds.squeeze(1), 3)
+                va_5 = accuracy(val_targets, val_preds.squeeze(1), 5)
+                print("Iter:", iter_count, "Loss:", float(loss))
+                print(f"Train Acc: 1-deg = {ta_1:.4f}, 3-deg = {ta_3:.4f}, 5-deg = {ta_5:.4f}")
+                print(f"Val Acc: 1-deg = {va_1:.4f}, 3-deg = {va_3:.4f}, 5-deg = {va_5:.4f}")
 
         # Evaluation on validation data at end of epoch
         model.eval()
         with torch.no_grad():
             val_preds = model(val_inputs)
-            va = accuracy(val_targets, val_preds.squeeze(1), allowance)
+            va_1 = accuracy(val_targets, val_preds.squeeze(1), 1)
+            va_3 = accuracy(val_targets, val_preds.squeeze(1), 3)
+            va_5 = accuracy(val_targets, val_preds.squeeze(1), 5)
             val_loss = criterion(val_preds, val_targets.unsqueeze(1).to(device))
 
         # Print average training and validation loss for the epoch
         average_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Average Training Loss: {average_loss:.4f} , Average Validation Loss: {val_loss:.4f}, Validation Accuracy: {va:.4f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Average Training Loss: {average_loss:.4f} , Average Validation Loss: {val_loss:.4f}")
+        print(f"Val Acc: 1-deg = {va_1:.4f}, 3-deg = {va_3:.4f}, 5-deg = {va_5:.4f}")
+    
+    # Return final validation loss
+    model.eval()
+    val_preds = model(val_inputs)
+    val_loss = criterion(val_preds, val_targets.unsqueeze(1).to(device))
+    return val_loss
+
 
 if __name__ == '__main__':
     device = torch.device("cpu")
@@ -126,26 +142,49 @@ if __name__ == '__main__':
     val_data = pd.DataFrame(imputer.fit_transform(val_data), columns=val_data.columns)
     test_data = pd.DataFrame(imputer.fit_transform(test_data), columns=test_data.columns)
 
-    # Hyperparameters
+    # Constants
     input_size = 108
-    hidden_size = 64
     num_layers = 2
-    batch_size = 64
-    learning_rate = 0.005
-    num_epochs = 20
-    seq_len = 5
-    plot_every = 100
-    allowance = 5.
+    sequence_length = 10
+    plot_every = 200
 
-    print(f"Accuracy will be tested by checking if the predicted and target temperatures are within {allowance} degrees of each other.")
+    # Hyperparameters to tune
+    best_hidden_size = None
+    best_batch_size = None
+    best_learning_rate = None
+    best_num_epochs = None
 
-    # Initialize model, loss function, and optimizer
-    model = LSTMModel(input_size, hidden_size, num_layers)
+    best_val_loss = torch.inf
+
+    # Tuning using grid search
+    for hidden_size in [20, 50, 100]:
+        for batch_size in [20, 50, 100]:
+            for learning_rate in [0.005, 0.01, 0.1]:
+                for num_epochs in [10, 25, 50]:
+                    print(f"Training with hidden_size = {hidden_size}, batch_size = {batch_size}, learning_rate = {learning_rate}, num_epochs = {num_epochs}.")
+                    # Initialize model, loss function, and optimizer
+                    model = LSTMModel(input_size, hidden_size, num_layers)
+                    model = model.to(device)
+
+                    val_loss = train(model, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, plot_every, True)
+                    print(f"Val Loss = {val_loss:.4f}")
+
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_hidden_size = hidden_size
+                        best_batch_size = batch_size
+                        best_learning_rate = learning_rate
+                        best_num_epochs = num_epochs
+
+    print(f"Best hyperparameters are hidden_size = {best_hidden_size}, batch_size = {best_batch_size}, learning_rate = {best_learning_rate}, num_epochs = {best_num_epochs}.")
+    print("Evaluating best model on test data...")
+
+    model = LSTMModel(input_size, best_hidden_size, num_layers)
     model = model.to(device)
 
-    train(model, device, train_data, val_data, learning_rate, batch_size, num_epochs, seq_len, plot_every, True, allowance)
+    train(model, device, train_data, val_data, best_learning_rate, best_batch_size, best_num_epochs, sequence_length, plot_every, True)
 
-    test_dataset = TemperatureDataset(test_data, seq_len)
+    test_dataset = TemperatureDataset(test_data, sequence_length)
     test_loader = DataLoader(test_dataset, batch_size=batch_size)
     # Evaluation on test data
     criterion = nn.MSELoss()
@@ -167,9 +206,12 @@ if __name__ == '__main__':
     test_targets = test_targets.to(device)
     with torch.no_grad():
         test_preds = model(test_inputs)
-        ta = accuracy(test_targets, test_preds.squeeze(1), allowance)
+        ta_1 = accuracy(test_targets, test_preds.squeeze(1), 1)
+        ta_3 = accuracy(test_targets, test_preds.squeeze(1), 3)
+        ta_5 = accuracy(test_targets, test_preds.squeeze(1), 5)
         test_loss = criterion(test_preds, test_targets.unsqueeze(1).to(device))
 
     # Print average test loss
     
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {ta:.4f}")
+    print(f"Test Loss: {test_loss:.4f}")
+    print(f"Test Acc: 1-deg = {ta_1:.4f}, 3-deg = {ta_3:.4f}, 5-deg = {ta_5:.4f}")
