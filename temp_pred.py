@@ -1,5 +1,6 @@
 import pandas as pd
 import torch
+import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
@@ -7,41 +8,36 @@ from sklearn.impute import SimpleImputer
 
 class TemperatureDataset(Dataset):
     def __init__(self, data, sequence_length=10):
-        self.sequence_length = sequence_length
+        self.seq_len = sequence_length
         self.data = data.to_numpy()
 
     def __len__(self):
-        return len(self.data) - self.sequence_length
+        return len(self.data) - self.seq_len
 
     def __getitem__(self, idx):
-        end_idx = idx + self.sequence_length
-        sequence = torch.tensor(self.data[idx:end_idx], dtype=torch.float32)
-        target = torch.tensor(self.data[end_idx][-1], dtype=torch.float32)
-        return {
-            'sequence': sequence,
-            'target': target
-        }
+        x = self.data[idx:idx + self.seq_len]
+        y = self.data[idx + self.seq_len]
+        return {'sequence': x, 'target': y}
     
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers=1):
         super(LSTMModel, self).__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc = nn.Linear(hidden_size, input_size)
 
     def forward(self, x):
+        if x.dtype != torch.float32:
+            x = x.float()
         out, _ = self.lstm(x)
         out = self.fc(out[:, -1, :])
         return out
 
 def accuracy(targs, preds, allowance):
-    assert targs.shape == preds.shape
     return torch.mean((torch.abs(targs - preds) <= allowance).float()).item()
 
 def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=64, num_epochs=10, seq_len=5, plot_every=50, plot=True):
-    # Create datasets and data loaders
     train_dataset = TemperatureDataset(train_data, seq_len)
     val_dataset = TemperatureDataset(val_data, seq_len)
-
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
@@ -63,55 +59,65 @@ def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=6
     val_inputs = val_inputs.to(device)
     val_targets = val_targets.to(device)
         
-
-    iter_count = 0
+    train_losses = []
+    val_losses = []
     for epoch in range(num_epochs):
         total_loss = 0
 
-        # Training loop
-        model.train()  
+        model.train()
         for batch in train_loader:
-            iter_count += 1
             inputs, target = batch['sequence'].to(device), batch['target'].to(device)
             output = model(inputs)
-            loss = criterion(output.to(device), target.unsqueeze(1).to(device))
+            loss = criterion(output.float()[:36], target.float()[:36])
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
-            if iter_count % plot_every == 0:
-                ta_1 = accuracy(target.to(device), output.squeeze(1).to(device), 1)
-                ta_3 = accuracy(target.to(device), output.squeeze(1).to(device), 3)
-                ta_5 = accuracy(target.to(device), output.squeeze(1).to(device), 5)
-                val_preds = model(val_inputs)
-                va_1 = accuracy(val_targets, val_preds.squeeze(1), 1)
-                va_3 = accuracy(val_targets, val_preds.squeeze(1), 3)
-                va_5 = accuracy(val_targets, val_preds.squeeze(1), 5)
-                print("Iter:", iter_count, "Loss:", float(loss))
-                print(f"Train Acc: 1-deg = {ta_1:.4f}, 3-deg = {ta_3:.4f}, 5-deg = {ta_5:.4f}")
-                print(f"Val Acc: 1-deg = {va_1:.4f}, 3-deg = {va_3:.4f}, 5-deg = {va_5:.4f}")
 
-        # Evaluation on validation data at end of epoch
         model.eval()
         with torch.no_grad():
             val_preds = model(val_inputs)
-            va_1 = accuracy(val_targets, val_preds.squeeze(1), 1)
-            va_3 = accuracy(val_targets, val_preds.squeeze(1), 3)
-            va_5 = accuracy(val_targets, val_preds.squeeze(1), 5)
-            val_loss = criterion(val_preds, val_targets.unsqueeze(1).to(device))
+            val_loss = criterion(val_preds.float()[:36], val_targets.float()[:36])
+            v1 = accuracy(val_targets[:36], val_preds[:36], 1)
+            v3 = accuracy(val_targets[:36], val_preds[:36], 3)
+            v5 = accuracy(val_targets[:36], val_preds[:36], 5)
+            train_losses.append(total_loss / len(train_loader))
+            val_losses.append(val_loss.item())
 
-        # Print average training and validation loss for the epoch
         average_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Average Training Loss: {average_loss:.4f} , Average Validation Loss: {val_loss:.4f}")
-        print(f"Val Acc: 1-deg = {va_1:.4f}, 3-deg = {va_3:.4f}, 5-deg = {va_5:.4f}")
-    
-    # Return final validation loss
-    model.eval()
-    val_preds = model(val_inputs)
-    val_loss = criterion(val_preds, val_targets.unsqueeze(1).to(device))
-    return val_loss
+        print(f"Val Acc 1: {v1}, Val Acc 3: {v3}, Val Acc 5: {v5}")
 
+    if plot:
+        plt.figure(figsize=(10, 5))
+        plt.plot(train_losses, label='Training Loss')
+        plt.plot(val_losses, label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training and Validation Loss')
+        plt.legend()
+        plt.savefig(f'figures/temp_prediction_lr:{learning_rate}_batch_size:{batch_size}_num_epochs:{num_epochs}_seq_len:{seq_len}.jpg')
+
+    model.eval()
+    with torch.no_grad():
+        val_preds = model(val_inputs)
+        average_pred = torch.mean(val_preds, dim=0)
+        average_target = torch.mean(val_targets, dim=0)
+    plt.figure(figsize=(10, 5))
+    plt.scatter(train_data.columns[:36], average_pred[:36], label='Average Predictions')
+    plt.scatter(train_data.columns[:36], average_target[:36], label='Average Targets')
+    plt.plot(train_data.columns.to_numpy()[:36], average_pred[:36], marker='o', linestyle='-', color='blue')
+    plt.plot(train_data.columns.to_numpy()[:36], average_target[:36], marker='o', linestyle='-', color='orange')
+    plt.xlabel('City')
+    plt.ylabel('Temperature')
+    plt.title('Average Predicted Temperatures vs Actual across Cities')
+    plt.xticks(rotation=90)
+    plt.legend()
+    plt.show()
+
+    val_loss = criterion(val_preds.float()[:36], val_targets.float()[:36])    
+    return val_loss
 
 if __name__ == '__main__':
     device = torch.device("cpu")
@@ -149,43 +155,45 @@ if __name__ == '__main__':
     plot_every = 200
 
     # Hyperparameters to tune
-    best_hidden_size = None
-    best_batch_size = None
-    best_learning_rate = None
-    best_num_epochs = None
+    best_hidden_size = 100
+    best_batch_size = 20
+    best_learning_rate = 0.01
+    best_num_epochs = 10
+    # best_val_loss = torch.inf
 
-    best_val_loss = torch.inf
+    # # Tuning using grid search
+    # for hidden_size in [20, 50, 100]:
+    #     for batch_size in [20, 50, 100]:
+    #         for learning_rate in [0.005, 0.01, 0.1]:
+    #             for num_epochs in [5, 10, 15]:
+    #                 print(f"Training with hidden_size = {hidden_size}, batch_size = {batch_size}, learning_rate = {learning_rate}, num_epochs = {num_epochs}.")
+    #                 # Initialize model, loss function, and optimizer
+    #                 model = LSTMModel(input_size, hidden_size, num_layers)
+    #                 model = model.to(device)
 
-    # Tuning using grid search
-    for hidden_size in [20, 50, 100]:
-        for batch_size in [20, 50, 100]:
-            for learning_rate in [0.005, 0.01, 0.1]:
-                for num_epochs in [10, 25, 50]:
-                    print(f"Training with hidden_size = {hidden_size}, batch_size = {batch_size}, learning_rate = {learning_rate}, num_epochs = {num_epochs}.")
-                    # Initialize model, loss function, and optimizer
-                    model = LSTMModel(input_size, hidden_size, num_layers)
-                    model = model.to(device)
+    #                 val_loss = train(model, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, plot_every, True)
+    #                 print(f"Val Loss = {val_loss:.4f}")
 
-                    val_loss = train(model, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, plot_every, True)
-                    print(f"Val Loss = {val_loss:.4f}")
+    #                 if val_loss < best_val_loss:
+    #                     best_val_loss = val_loss
+    #                     best_hidden_size = hidden_size
+    #                     best_batch_size = batch_size
+    #                     best_learning_rate = learning_rate
+    #                     best_num_epochs = num_epochs
 
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        best_hidden_size = hidden_size
-                        best_batch_size = batch_size
-                        best_learning_rate = learning_rate
-                        best_num_epochs = num_epochs
-
-    print(f"Best hyperparameters are hidden_size = {best_hidden_size}, batch_size = {best_batch_size}, learning_rate = {best_learning_rate}, num_epochs = {best_num_epochs}.")
-    print("Evaluating best model on test data...")
+    # print(f"Best hyperparameters are hidden_size = {best_hidden_size}, batch_size = {best_batch_size}, learning_rate = {best_learning_rate}, num_epochs = {best_num_epochs}.")
+    # print("Evaluating best model on test data...")
 
     model = LSTMModel(input_size, best_hidden_size, num_layers)
     model = model.to(device)
 
-    train(model, device, train_data, val_data, best_learning_rate, best_batch_size, best_num_epochs, sequence_length, plot_every, True)
+    train(model, device, train_data, val_data, best_learning_rate, 
+          best_batch_size, best_num_epochs, sequence_length, plot_every, False)
 
     test_dataset = TemperatureDataset(test_data, sequence_length)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    test_loader = DataLoader(test_dataset, batch_size=best_batch_size)
+    
+    
     # Evaluation on test data
     criterion = nn.MSELoss()
     model.eval()
@@ -206,10 +214,10 @@ if __name__ == '__main__':
     test_targets = test_targets.to(device)
     with torch.no_grad():
         test_preds = model(test_inputs)
-        ta_1 = accuracy(test_targets, test_preds.squeeze(1), 1)
-        ta_3 = accuracy(test_targets, test_preds.squeeze(1), 3)
-        ta_5 = accuracy(test_targets, test_preds.squeeze(1), 5)
-        test_loss = criterion(test_preds, test_targets.unsqueeze(1).to(device))
+        ta_1 = accuracy(test_targets[:36], test_preds[:36], 1)
+        ta_3 = accuracy(test_targets[:36], test_preds[:36], 3)
+        ta_5 = accuracy(test_targets[:36], test_preds[:36], 5)
+        test_loss = criterion(test_preds[:36], test_targets[:36])
 
     # Print average test loss
     
