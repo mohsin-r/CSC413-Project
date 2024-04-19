@@ -13,6 +13,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from keras.models import Sequential
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from keras.layers import Dense, SimpleRNN
 from keras.optimizers import RMSprop
 from keras.callbacks import Callback
@@ -45,7 +46,7 @@ temperature_TO.dropna(inplace = True)
 pressure_TO.interpolate(inplace = True)
 pressure_TO.dropna(inplace = True)
 
-#Im using around 80% of the data for the training and 20% for the test
+#We are using around 80% of the data for the training and 20% for the test
 train = np.array(humidity_TO['Toronto'][:35000])
 test = np.array(humidity_TO['Toronto'][35000:])
 train=train.reshape(-1,1)
@@ -56,8 +57,6 @@ print(test.shape)
 step = 12 #Assuming that 12 hours of humidity data will be enough to correctly predict 13. hour.
 test = np.append(test,np.repeat(test[-1,],step))
 train = np.append(train,np.repeat(train[-1,],step))
-print(train.shape)
-print(test.shape)
 
 def matrix_conversion(data, step):
     a, b = [], []
@@ -90,11 +89,40 @@ class HumidityCallback(Callback):
         if (epoch + 1) % 50 == 0 and epoch > 0:
             print("Epoch number {} done".format(epoch + 1))
 
-humidity_model.fit(train_x,train_y,
+humidity_model.fit(train_x, train_y,
           epochs = num_epochs,
           batch_size = batch,
-          callbacks=[HumidityCallback()],verbose=0)
+          callbacks=[HumidityCallback()], verbose =0 )
+
+plt.figure(figsize=(14,10))
+plt.title("Epochs vs RMSE",fontsize = 14)
+plt.plot(np.sqrt(humidity_model.history.history['loss']), c = 'k', lw = 2)
+plt.grid(True)
+plt.xlabel("Epochs", fontsize = 12)
+plt.ylabel("Root Mean Squared Error", fontsize = 12)
+plt.xticks(fontsize = 12)
+plt.yticks(fontsize = 12)
+plt.show()
 
 train_predict = humidity_model.predict(train_x)
 test_predict = humidity_model.predict(test_x)
-predicted = np.concatenate((train_predict,test_predict),axis=0)
+predicted = np.concatenate((train_predict,test_predict), axis = 0)
+
+index = humidity_TO.index.values
+
+if predicted.shape[0] > index.shape[0]:
+    predicted = predicted[:index.shape[0]]
+
+predicted = predicted.ravel()  # This flattens the array to ensure it matches 'index'
+plt.figure(figsize=(30,10))
+plt.title("Humidity Model: Target vs. Predicted", fontsize=15)
+plt.plot(index, humidity_TO['Toronto'].values[:index.shape[0]], color='blue')  # Ensure this is also correctly sized
+plt.plot(index, predicted, color='orange', alpha=0.75)
+plt.legend(['Predicted Data', 'Target Data'], fontsize=13)
+plt.axvline(x=index[35000], color="red")  # Check if 35000 is the correct index for your test/train split visualization
+plt.grid(True)
+plt.ylim(-10, 110)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.show()
+
