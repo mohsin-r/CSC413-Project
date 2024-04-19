@@ -56,14 +56,12 @@ class RegularizedLSTM(nn.Module):
         self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
         self.fc2 = nn.Linear(hidden_size // 2, input_size)
         self.dropout = nn.Dropout(p=dropout)
-        self.relu = nn.ReLU()
 
     def forward(self, x):
         x = x.float()
         out, _ = self.lstm(x)
         out = out[:, -1, :]
         out = self.fc1(out)
-        out = self.relu(out)
         out = self.dropout(out)
         out = self.fc2(out)
         return out
@@ -76,7 +74,6 @@ class RegularizedCNNLSTM(nn.Module):
         self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
         self.fc2 = nn.Linear(hidden_size // 2, input_size)
         self.dropout = nn.Dropout(p=dropout)
-        self.relu = nn.ReLU()
 
     def forward(self, x):
         x = x.float() 
@@ -86,7 +83,6 @@ class RegularizedCNNLSTM(nn.Module):
         out, _ = self.lstm(x)
         out = out[:, -1, :]
         out = self.fc1(out)
-        out = self.relu(out)
         out = self.dropout(out)
         out = self.fc2(out)
         return out
@@ -97,8 +93,8 @@ def accuracy(targs, preds, allowance):
 def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=64, num_epochs=10, seq_len=5, plot=True, file=''):
     train_dataset = TemperatureDataset(train_data, seq_len)
     val_dataset = TemperatureDataset(val_data, seq_len)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True).to(device)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size).to(device)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     criterion = nn.L1Loss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -117,53 +113,47 @@ def train(model, device, train_data, val_data, learning_rate=0.005, batch_size=6
             val_targets = torch.cat((val_targets, val_batch['target']), 0)
     val_inputs = val_inputs.to(device)
     val_targets = val_targets.to(device)
-        
+    model.to(device)
     train_losses = []
     val_losses = []
     for epoch in tqdm(range(num_epochs)):
         total_loss = 0
-
         model.train()
         for batch in train_loader:
             inputs, target = batch['sequence'].to(device), batch['target'].to(device)
-            output = model(inputs)
-            loss = torch.sqrt(criterion(output.float()[:36], target.float()[:36]))
             optimizer.zero_grad()
+            output = model(inputs)
+            loss = criterion(output.float()[:36], target.float()[:36])
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
-
-        model.eval()
-        with torch.no_grad():
-            val_preds = model(val_inputs)
-            val_loss = torch.sqrt(criterion(val_preds.float()[:36], val_targets.float()[:36]))
-            v1, v3, v5 = accuracy(val_targets[:36], val_preds[:36], 1), accuracy(val_targets[:36], val_preds[:36], 3), accuracy(val_targets[:36], val_preds[:36], 5)
-            train_losses.append(total_loss / len(train_loader))
-            val_losses.append(val_loss.item())
-
-        average_loss = total_loss / len(train_loader)
-        # print(f"Epoch [{epoch+1}/{num_epochs}], Average Training Loss: {average_loss:.4f} , Average Validation Loss: {val_loss:.4f}")
-        # print(f"Val Acc 1: {v1}, Val Acc 3: {v3}, Val Acc 5: {v5}")
-    
+        
+        if plot:
+            model.eval()
+            with torch.no_grad():
+                val_preds = model(val_inputs)
+                val_loss = criterion(val_preds.float()[:36], val_targets.float()[:36])
+                v1, v3, v5 = accuracy(val_targets[:36], val_preds[:36], 1), accuracy(val_targets[:36], val_preds[:36], 3), accuracy(val_targets[:36], val_preds[:36], 5)
+                train_losses.append(total_loss / len(train_loader))
+                val_losses.append(val_loss.item())
 
     model.eval()
     with torch.no_grad():
         val_preds = model(val_inputs)
-        val_loss = torch.sqrt(criterion(val_preds.float()[:36], val_targets.float()[:36]))    
+        val_loss = criterion(val_preds.float()[:36], val_targets.float()[:36]) 
         v1, v3, v5 = accuracy(val_targets[:36], val_preds[:36], 1), accuracy(val_targets[:36], val_preds[:36], 3), accuracy(val_targets[:36], val_preds[:36], 5)
     if plot:
         plt.figure(figsize=(10, 5))
-        plt.plot(train_losses, label='Training Loss')
-        plt.plot(val_losses, label='Validation Loss')
+        plt.plot(train_losses[1:], label='Training Loss')
+        plt.plot(val_losses[1:], label='Validation Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Training and Validation Loss')
         plt.legend()
         plt.savefig(f'temp/loss/{file}.jpg')
         with torch.no_grad():
-            average_pred = torch.mean(val_preds, dim=0)
-            average_target = torch.mean(val_targets, dim=0)
+            average_pred = torch.mean(val_preds.cpu(), dim=0)
+            average_target = torch.mean(val_targets.cpu(), dim=0)
         plt.figure(figsize=(10, 5))
         plt.scatter(train_data.columns[:36], average_pred[:36], label='Average Predictions')
         plt.scatter(train_data.columns[:36], average_target[:36], label='Average Targets')
@@ -217,52 +207,61 @@ if __name__ == '__main__':
     best_kernel_size, best_dropout = [0,0], [0,0]
     best_v1, best_v2, best_v3, best_v4 = torch.inf, torch.inf, torch.inf, torch.inf
 
+    tune = False
     # Tuning using grid search
-    for sequence_length in [10, 20, 30]:
-        for hidden_size, batch_size in [(10,100), (50,50), (100, 10)]:
-            for learning_rate, num_epochs in tqdm([(0.01, 30), (0.05, 20), (0.1, 15)]):
-                print(f"Testing {hidden_size,batch_size,learning_rate, num_epochs}")
-                model = LSTMModel(input_size, hidden_size, num_layers).to(device)
-                vl1 = train(model, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
+    if tune: 
+        for sequence_length in [10, 20, 30]:
+            for hidden_size, batch_size in [(25,25), (50, 10)]:
+                for learning_rate, num_epochs in tqdm([(0.01, 30), (0.1, 15)]):
+                    print(f"Testing {hidden_size, batch_size, learning_rate, num_epochs}")
+                    model = LSTMModel(input_size, hidden_size, num_layers).to(device)
+                    vl1 = train(model, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
+                    if vl1 < best_v1:
+                            best_v1, best_hidden_size[0], best_batch_size[0], best_learning_rate[0], best_num_epochs[0], best_seq[0] = vl1, hidden_size, batch_size, learning_rate, num_epochs, sequence_length
 
-                for kernel_size in [3,5,7]:
-                    model2 = CNNLSTMModel(input_size, kernel_size, hidden_size, num_layers).to(device)
-                    vl2 = train(model2, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
-                    if vl2 < best_v2:
-                        best_v2, best_hidden_size[1], best_batch_size[1], best_learning_rate[1], best_num_epochs[1], best_kernel_size[0] = vl2, hidden_size, batch_size, learning_rate, num_epochs, kernel_size
-                    
-                    for dropout in [0.01, 0.1, 0.5]:
-                        model4 = RegularizedCNNLSTM(input_size, kernel_size, hidden_size, num_layers, dropout).to(device)
-                        vl4 = train(model4, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
-                        if vl4 < best_v4:
-                            best_v4, best_hidden_size[3], best_batch_size[3], best_learning_rate[3], best_num_epochs[3], best_kernel_size[1], best_dropout[1] = vl4, hidden_size, batch_size, learning_rate, num_epochs, kernel_size, dropout
-                
-                for dropout in [0.01, 0.1, 0.5]:
-                    model3 = RegularizedLSTM(input_size, hidden_size, num_layers, dropout).to(device)
-                    vl3 = train(model3, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
-                    if vl3 < best_v3:
-                        best_v3, best_hidden_size[2], best_batch_size[2], best_learning_rate[2], best_num_epochs[2], best_dropout[0] = vl3, hidden_size, batch_size, learning_rate, num_epochs, dropout
-                
-                if vl1 < best_v1:
-                    best_v1, best_hidden_size, best_batch_size, best_learning_rate, best_num_epochs = vl1, hidden_size, batch_size, learning_rate, num_epochs
+                    for kernel_size in [5,7]:
+                        model2 = CNNLSTMModel(input_size, kernel_size, hidden_size, num_layers).to(device)
+                        vl2 = train(model2, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
+                        if vl2 < best_v2:
+                            best_v2 = vl2
+                            best_hidden_size[1], best_batch_size[1], best_learning_rate[1], best_num_epochs[1], best_kernel_size[0] = hidden_size, batch_size, learning_rate, num_epochs, kernel_size
 
-    print(f"""Best hyperparameters are: 
-          \nhidden_size = {best_hidden_size}, 
+                        for dropout in [0.01, 0.1]:
+                            model4 = RegularizedCNNLSTM(input_size, kernel_size, hidden_size, num_layers, dropout).to(device)
+                            vl4 = train(model4, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
+                            if vl4 < best_v4:
+                                best_v4 = vl4
+                                best_hidden_size[3], best_batch_size[3], best_learning_rate[3], best_num_epochs[3], best_kernel_size[1], best_dropout[1] = hidden_size, batch_size, learning_rate, num_epochs, kernel_size, dropout
+
+                    for dropout in [0.01, 0.1]:
+                        model3 = RegularizedLSTM(input_size, hidden_size, num_layers, dropout).to(device)
+                        vl3 = train(model3, device, train_data, val_data, learning_rate, batch_size, num_epochs, sequence_length, False)
+                        if vl3 < best_v3:
+                            best_v3 = vl3
+                            best_hidden_size[2], best_batch_size[2], best_learning_rate[2], best_num_epochs[2], best_dropout[0] = hidden_size, batch_size, learning_rate, num_epochs, dropout                
+        print(f"""Best hyperparameters are: 
+          \n Losses = {best_v1, best_v2, best_v3, best_v4}
+          \n hidden_size = {best_hidden_size}, 
           \n batch_size = {best_batch_size}, 
           \n learning_rate = {best_learning_rate}, 
           \n num_epochs = {best_num_epochs},
           \n kernel_size = {best_kernel_size},
-          \n dropout = {best_dropout}""")
+          \n dropout = {best_dropout},
+
+          \n seq_len = {best_seq}""")
     
+    else:
+        best_hidden_size, best_batch_size, best_learning_rate, best_num_epochs, best_seq = [50, 20, 50, 20], [10, 25, 10, 25], [0.1, 0.1, 0.01, 0.1],  [15,15,30,15], [20, 30, 30, 20]
+        best_kernel_size, best_dropout = [5,7], [0.1,0.01]
 
     model = LSTMModel(input_size, best_hidden_size[0], num_layers).to(device)
     model2 = CNNLSTMModel(input_size, best_kernel_size[0], best_hidden_size[1], num_layers).to(device)
     model3 = RegularizedLSTM(input_size, best_hidden_size[2], num_layers, best_dropout[0]).to(device)
     model4 = RegularizedCNNLSTM(input_size, best_kernel_size[1], best_hidden_size[3], num_layers, best_dropout[1]).to(device)
-    r1 = train(model, device, train_data, val_data, learning_rate[0], batch_size[0], num_epochs[0], sequence_length[0],  True, 'Vanilla')
-    r2 = train(model2, device, train_data, val_data, learning_rate[1], batch_size[1], num_epochs[1], sequence_length[1], True, 'CNN')
-    r3 = train(model3, device, train_data, val_data, learning_rate[2], batch_size[2], num_epochs[2], sequence_length[2], True, 'Dropout')
-    r4 = train(model4, device, train_data, val_data, learning_rate[3], batch_size[3], num_epochs[3], sequence_length[3], True, 'CNNDropout')
+    r1 = train(model, device, train_data, val_data, best_learning_rate[0], best_batch_size[0], best_num_epochs[0], best_seq[0],  True, 'Vanilla_comp')
+    r2 = train(model2, device, train_data, val_data, best_learning_rate[1], best_batch_size[1], best_num_epochs[1], best_seq[1], True, 'CNN_comp')
+    r3 = train(model3, device, train_data, val_data, best_learning_rate[2], best_batch_size[2], best_num_epochs[2], best_seq[2], True, 'Dropout_comp')
+    r4 = train(model4, device, train_data, val_data, best_learning_rate[3], best_batch_size[3], best_num_epochs[3], best_seq[3], True, 'CNNDropout_comp')
 
     print(f"""Best Performance evaluation on Validation data:\n\n
           ========================================\n\n
@@ -270,36 +269,3 @@ if __name__ == '__main__':
           Model 2: Loss = {r2[0]}, Acc(1,3,5-deg) = {r2[1], r2[2], r2[3]} \n
           Model 3: Loss = {r3[0]}, Acc(1,3,5-deg) = {r3[1], r3[2], r3[3]} \n
           Model 4: Loss = {r4[0]}, Acc(1,3,5-deg) = {r4[1], r4[2], r4[3]} \n """)
-    
-
-    # val_loader1 = DataLoader(TemperatureDataset(test_data, sequence_length[0]), batch_size=batch_size[0])
-    # val_loader2 = DataLoader(TemperatureDataset(test_data, sequence_length[1]), batch_size=batch_size[1])
-    # val_loader3 = DataLoader(TemperatureDataset(test_data, sequence_length[2]), batch_size=batch_size[2])
-    # val_loader4 = DataLoader(TemperatureDataset(test_data, sequence_length[3]), batch_size=batch_size[3])
-
-    # criterion = nn.L1Loss()
-    # optimizer1 = optim.Adam(model.parameters(), lr=learning_rate[0])
-    # optimizer2 = optim.Adam(model.parameters(), lr=learning_rate[1])
-    # optimizer3 = optim.Adam(model.parameters(), lr=learning_rate[2])
-    # optimizer4 = optim.Adam(model.parameters(), lr=learning_rate[3])
-
-    # val_inputs, val_targets = [None, None, None, None], [None, None, None, None]
-
-    # for val_batch in val_loader1:
-    #     if val_inputs[0] is None:
-    #         val_inputs[0] = val_batch['sequence']
-    #     else:
-    #         val_inputs[0] = torch.cat((val_inputs[0], val_batch['sequence']), 0)
-    #     if val_targets is None:
-    #         val_targets[0] = val_batch['target']
-    #     else:
-    #         val_targets[0] = torch.cat((val_targets[0], val_batch['target']), 0)
-
-        
-    # model.eval()
-    # with torch.no_grad():
-    #     val_preds = model(val_inputs)
-    #     val_loss = torch.sqrt(criterion(val_preds.float()[:36], val_targets.float()[:36]))
-    #     v1 = accuracy(val_targets[:36], val_preds[:36], 1)
-    #     v3 = accuracy(val_targets[:36], val_preds[:36], 3)
-    #     v5 = accuracy(val_targets[:36], val_preds[:36], 5)
